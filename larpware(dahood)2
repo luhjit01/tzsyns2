@@ -1,0 +1,1389 @@
+-- Tables
+local Library = loadstring(game: HttpGet("https://raw.githubusercontent.com/matas3535/PoopLibrary/main/Library.lua"))()
+
+-- Variables
+-- Init
+local Window = Library: New({Name = "Larpware (kason)",  Accent = Color3.fromRGB(25,  240,  100)})
+
+-- FIX:  Remove drag restrictions AFTER window is created
+-- This avoids breaking the library's initialization
+pcall(function()
+    -- Find the actual GUI frame and remove all drag constraints
+    local function RemoveDragLimits()
+        -- Try to find the main frame
+        local frame = nil
+        for _,  v in pairs(getgc(true)) do
+            if type(v) == "table" and rawget(v,  "Name") == "Poop" then
+                frame = v
+                break
+            end
+        end
+        
+        if frame then
+            -- Remove all position clamping
+            if rawget(frame,  "DragMaxX") then rawset(frame,  "DragMaxX",  999999) end
+            if rawget(frame,  "DragMaxY") then rawset(frame,  "DragMaxY",  999999) end
+            if rawget(frame,  "DragMinX") then rawset(frame,  "DragMinX",  -999999) end
+            if rawget(frame,  "DragMinY") then rawset(frame,  "DragMinY",  -999999) end
+            
+            -- Also try to find and remove any clamp functions
+            for _,  v in pairs(getgc(true)) do
+                if type(v) == "table" then
+                    if rawget(v,  "ClampPosition") then
+                        rawset(v,  "ClampPosition",  function(pos) return pos end)
+                    end
+                    if rawget(v,  "UpdateDrag") then
+                        -- Override to prevent clamping
+                        rawset(v,  "UpdateDrag",  function() end)
+                    end
+                end
+            end
+            
+            -- If frame has a Position property,  allow it to go anywhere
+            if frame: IsA("Frame") then
+                frame: GetPropertyChangedSignal("Position"): Connect(function()
+                    -- Allow any position without restrictions
+                end)
+            end
+        end
+    end
+    
+    -- Run after a small delay to ensure the window is fully initialized
+    task.wait(0.1)
+    RemoveDragLimits()
+end)
+
+local Aimbot = Window: Page({Name = "Aimbot"})
+local Visuals = Window: Page({Name = "Visuals"})
+local Misc = Window: Page({Name = "Misc"})
+local Settings = Window: Page({Name = "Settings"})
+
+-- // Aimbot Sections
+local Aimbot_Main = Aimbot: Section({Name = "Main",  Side = "Left"})
+local Aimbot_Silent = Aimbot: Section({Name = "Silent Aim",  Side = "Right"})
+
+-- // Visuals Sections
+local Visuals_Enemies,  Visuals_Teamates,  Visuals_Self = Visuals: MultiSection({Sections = {"Enemies",  "Teamates",  "Self"},  Side = "Left",  Size = 200})
+
+-- // Misc Sections
+local Misc_Main = Misc: Section({Name = "Main",  Side = "Left"})
+
+-- // Settings Sections
+local Settings_Main = Settings: Section({Name = "Main",  Side = "Left"})
+
+-- // Silent Aim Variables
+local SilentAimSettings = {
+    Enabled = false,   
+    TeamCheck = false,   
+    VisibleCheck = false,   
+    TargetPart = "HumanoidRootPart",   
+    SilentAimMethod = "Raycast",   
+    FOVRadius = 180,   
+    FOVVisible = false,   
+    ShowSilentAimTarget = false,   
+    MouseHitPrediction = false,   
+    MouseHitPredictionAmount = 0.165,   
+    HitChance = 100
+}
+
+-- // Camlock Variables
+local CamLockSettings = {
+    Enabled = false,   
+    Prediction = false,   
+    Hotkey = Enum.KeyCode.F,   
+    CurrentTarget = nil,
+    TeamCheck = false -- Added team check for camlock
+}
+
+-- // Visuals Team Check
+local VisualsTeamCheck = false
+
+-- // Misc Variables
+local MiscSettings = {
+    FlyEnabled = false,  
+    NoClipEnabled = false,  
+    SpeedEnabled = false,  
+    SpeedValue = 16
+}
+
+local Camera = workspace.CurrentCamera
+local Players = game: GetService("Players")
+local RunService = game: GetService("RunService")
+local UserInputService = game: GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded: Wait()
+local Humanoid = Character: WaitForChild("Humanoid")
+local RootPart = Character: WaitForChild("HumanoidRootPart")
+
+-- Drawing objects for Silent Aim
+local mouse_box = Drawing.new("Square")
+mouse_box.Visible = false
+mouse_box.ZIndex = 999
+mouse_box.Color = Color3.fromRGB(0,  255,  0)
+mouse_box.Thickness = 20
+mouse_box.Size = Vector2.new(20,  20)
+mouse_box.Filled = true
+
+local fov_circle = Drawing.new("Circle")
+fov_circle.Thickness = 1
+fov_circle.NumSides = 100
+fov_circle.Radius = 180
+fov_circle.Filled = false
+fov_circle.Visible = false
+fov_circle.ZIndex = 999
+fov_circle.Transparency = 1
+fov_circle.Color = Color3.fromRGB(0,  255,  0)
+
+-- Chams variables
+local ChamsEnabled = false
+local ws = game:GetService("Workspace")
+local plrs = game:GetService("Players")
+local rs = game:GetService("RunService")
+local lp = plrs.LocalPlayer
+local playerCache = {}
+local chams = {}
+
+-- Chams functions
+local function addToCache(obj)
+    if not obj:IsA("Model") then return end
+    local root = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("LowerTorso")
+    if root and obj.Name ~= lp.Name then
+        playerCache[obj] = true
+    end
+end
+
+local function makeChams(model)
+    if chams[model] then return end
+    local hl = Instance.new("Highlight")
+    hl.FillColor = Color3.fromRGB(0, 191, 255)
+    hl.FillTransparency = 0.5
+    hl.OutlineTransparency = 1
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Enabled = false
+    hl.Parent = model
+    chams[model] = hl
+end
+
+local function removeChams(model)
+    if chams[model] then
+        chams[model]:Destroy()
+        chams[model] = nil
+    end
+end
+
+-- Silent Aim Functions
+local function getPositionOnScreen(Vector)
+    local Vec3,  OnScreen = Camera: WorldToViewportPoint(Vector)
+    return Vector2.new(Vec3.X,  Vec3.Y),  OnScreen
+end
+
+local function getMousePosition()
+    return UserInputService: GetMouseLocation()
+end
+
+local function IsPlayerVisible(Player)
+    local PlayerCharacter = Player.Character
+    local LocalPlayerCharacter = LocalPlayer.Character
+    if not (PlayerCharacter or LocalPlayerCharacter) then return end
+    
+    local PlayerRoot = PlayerCharacter: FindFirstChild(SilentAimSettings.TargetPart) or PlayerCharacter: FindFirstChild("HumanoidRootPart")
+    if not PlayerRoot then return end
+    
+    local CastPoints = {PlayerRoot.Position,  LocalPlayerCharacter,  PlayerCharacter}
+    local IgnoreList = {LocalPlayerCharacter,  PlayerCharacter}
+    local ObscuringObjects = #Camera: GetPartsObscuringTarget(CastPoints,  IgnoreList)
+    return ObscuringObjects == 0
+end
+
+local function getClosestPlayer()
+    if not SilentAimSettings.TargetPart then return end
+    
+    local Closest
+    local DistanceToMouse
+    
+    for _,  Player in next,  Players: GetPlayers() do
+        if Player == LocalPlayer then continue end
+        if SilentAimSettings.TeamCheck and Player.Team == LocalPlayer.Team then continue end
+        
+        local Character = Player.Character
+        if not Character then continue end
+        if SilentAimSettings.VisibleCheck and not IsPlayerVisible(Player) then continue end
+        
+        local HumanoidRootPart = Character: FindFirstChild("HumanoidRootPart")
+        local Humanoid = Character: FindFirstChild("Humanoid")
+        if not HumanoidRootPart or not Humanoid or Humanoid and Humanoid.Health <= 0 then continue end
+        
+        local ScreenPosition,  OnScreen = getPositionOnScreen(HumanoidRootPart.Position)
+        if not OnScreen then continue end
+        
+        local Distance = (getMousePosition() - ScreenPosition).Magnitude
+        if Distance <= (DistanceToMouse or SilentAimSettings.FOVRadius or 2000) then
+            Closest = Character[SilentAimSettings.TargetPart] or HumanoidRootPart
+            DistanceToMouse = Distance
+        end
+    end
+    
+    return Closest
+end
+
+local function CalculateChance(Percentage)
+    Percentage = math.floor(Percentage)
+    local chance = math.floor(Random.new().NextNumber(Random.new(),  0,  1) * 100) / 100
+    return chance <= Percentage / 100
+end
+
+-- // Camlock Functions
+local function getClosestPlayerToMouse()
+    local mousePos = getMousePosition()
+    local closestPlayer = nil
+    local shortestDistance = math.huge
+    
+    for _,  player in pairs(Players: GetPlayers()) do
+        if player == LocalPlayer or not player.Character then continue end
+        -- Added team check for camlock
+        if CamLockSettings.TeamCheck and player.Team == LocalPlayer.Team then continue end
+        
+        local head = player.Character: FindFirstChild("Head")
+        if not head then continue end
+        
+        local screenPos,  onScreen = Camera: WorldToViewportPoint(head.Position)
+        if not onScreen then continue end
+        
+        local distance = (Vector2.new(screenPos.X,  screenPos.Y) - mousePos).Magnitude
+        if distance < shortestDistance and distance <= 100 then
+            shortestDistance = distance
+            closestPlayer = player
+        end
+    end
+    
+    return closestPlayer
+end
+
+local function predictPosition(part,  deltaTime)
+    if not part then return end
+    local velocity = part.Velocity
+    return part.Position + (velocity * deltaTime)
+end
+
+-- // Misc Functions
+local function toggleFly(state)
+    MiscSettings.FlyEnabled = state
+    if state then
+        local BV = RootPart: FindFirstChild("ClientFlight")
+        local BG = RootPart: FindFirstChild("ClientFlightGyro")
+        if BV then BV: Destroy() end
+        if BG then BG: Destroy() end
+        
+        local BodyVelocity = Instance.new("BodyVelocity")
+        BodyVelocity.Name = "ClientFlight"
+        BodyVelocity.Parent = RootPart
+        BodyVelocity.MaxForce = Vector3.new(9e9,  9e9,  9e9)
+        BodyVelocity.Velocity = Vector3.new(0,  0,  0)
+    else
+        local BV = RootPart: FindFirstChild("ClientFlight")
+        if BV then BV: Destroy() end
+    end
+end
+
+local function toggleNoClip(state)
+    MiscSettings.NoClipEnabled = state
+    if Character then
+        for _,  child in pairs(Character: GetDescendants()) do
+            if child: IsA("BasePart") then
+                child.CanCollide = not state
+            end
+        end
+    end
+end
+
+local function toggleSpeed(state)
+    MiscSettings.SpeedEnabled = state
+    if Humanoid then
+        if state then
+            Humanoid.WalkSpeed = MiscSettings.SpeedValue
+        else
+            Humanoid.WalkSpeed = 16
+        end
+    end
+end
+
+-- // Camlock Section
+Aimbot_Main: Toggle({
+    Name = "Camlock",   
+    Default = false,   
+    Callback = function(state)
+        CamLockSettings.Enabled = state
+        if not state then
+            CamLockSettings.CurrentTarget = nil
+        end
+    end
+})
+
+Aimbot_Main: Toggle({
+    Name = "Prediction",   
+    Default = false,   
+    Callback = function(state)
+        CamLockSettings.Prediction = state
+    end
+})
+
+Aimbot_Main: Toggle({
+    Name = "Team Check",   
+    Default = false,   
+    Callback = function(state)
+        CamLockSettings.TeamCheck = state
+    end
+})
+
+Aimbot_Main: Keybind({
+    Name = "Set Camlock Hotkey",   
+    Default = CamLockSettings.Hotkey,   
+    Callback = function(key)
+        CamLockSettings.Hotkey = key
+    end
+})
+
+-- // Misc Section
+Misc_Main: Toggle({
+    Name = "Fly",   
+    Default = false,   
+    Callback = function(state)
+        toggleFly(state)
+    end
+})
+
+Misc_Main: Toggle({
+    Name = "NoClip",   
+    Default = false,   
+    Callback = function(state)
+        toggleNoClip(state)
+    end
+})
+
+Misc_Main: Toggle({
+    Name = "Speed",   
+    Default = false,   
+    Callback = function(state)
+        toggleSpeed(state)
+    end
+})
+
+Misc_Main: Slider({
+    Name = "Speed Value",   
+    Minimum = 16,   
+    Maximum = 500,   
+    Default = MiscSettings.SpeedValue,   
+    Decimals = 0,   
+    Callback = function(value)
+        MiscSettings.SpeedValue = value
+        if MiscSettings.SpeedEnabled and Humanoid then
+            Humanoid.WalkSpeed = value
+        end
+    end
+})
+
+-- // Visuals - Enemies Section
+local Skeletons = {}
+Visuals_Enemies: Toggle({
+    Name = "Skeletons",   
+    Default = false,   
+    Callback = function(state)
+        if state then
+            local SkeletonLibrary = loadstring(game: HttpGet("https://raw.githubusercontent.com/Blissful4992/ESPs/main/UniversalSkeleton.lua"))()
+            
+            for _,  Player in next,  game.Players: GetChildren() do
+                table.insert(Skeletons,  SkeletonLibrary: NewSkeleton(Player,  true))
+            end
+            
+            game.Players.PlayerAdded: Connect(function(Player)
+                table.insert(Skeletons,  SkeletonLibrary: NewSkeleton(Player,  true))
+            end)
+        else
+            for i,  skeleton in pairs(Skeletons) do
+                if skeleton and typeof(skeleton) == "table" and skeleton.Remove then
+                    skeleton: Remove()
+                end
+                Skeletons[i] = nil
+            end
+        end
+    end
+})
+
+-- Team Check Toggle for Visuals
+Visuals_Enemies: Toggle({
+    Name = "Team Check",   
+    Default = false,   
+    Callback = function(state)
+        VisualsTeamCheck = state
+    end
+})
+
+-- Chams Toggle
+Visuals_Enemies: Toggle({
+    Name = "Chams",   
+    Default = false,   
+    Callback = function(state)
+        ChamsEnabled = state
+        if state then
+            -- Initialize Chams
+            for _,  v in ipairs(ws:GetChildren()) do
+                addToCache(v)
+            end
+            
+            ws.ChildAdded:Connect(addToCache)
+            
+            ws.ChildRemoved:Connect(function(obj)
+                playerCache[obj] = nil
+                removeChams(obj)
+            end)
+            
+            -- Start chams render loop
+            task.spawn(function()
+                while ChamsEnabled do
+                    for model in next, playerCache do
+                        if not ChamsEnabled then break end
+                        -- Team check for chams
+                        local player = plrs:FindFirstChild(model.Name)
+                        if not VisualsTeamCheck or (player and player.Team ~= lp.Team) or not player then
+                            if not chams[model] then makeChams(model) end
+                            chams[model].Enabled = true
+                        else
+                            if chams[model] then
+                                chams[model].Enabled = false
+                            end
+                        end
+                    end
+                    task.wait(0.01)
+                end
+                
+                -- Disable all chams when turned off
+                for model in next, chams do
+                    if chams[model] then
+                        chams[model].Enabled = false
+                    end
+                end
+            end)
+        else
+            -- Disable all chams
+            for model in next, chams do
+                if chams[model] then
+                    chams[model].Enabled = false
+                end
+            end
+        end
+    end
+})
+
+-- Optimized Corners ESP Toggle
+local CornersESPEnabled = false
+local CornersDrawings = {}
+local CornersConnections = {}
+
+Visuals_Enemies: Toggle({
+    Name = "Corners",   
+    Default = false,   
+    Callback = function(state)
+        CornersESPEnabled = state
+        if state then
+            local Settings = {
+                Box_Color = Color3.fromRGB(0,  255,  0), 
+                Box_Thickness = 2, 
+                Team_Check = false, 
+                Team_Color = false, 
+                Autothickness = true
+            }
+            
+            local Space = game: GetService("Workspace")
+            local Player = game: GetService("Players").LocalPlayer
+            local Camera = Space.CurrentCamera
+            
+            local function NewLine(color,  thickness)
+                local line = Drawing.new("Line")
+                line.Visible = false
+                line.From = Vector2.new(0,  0)
+                line.To = Vector2.new(0,  0)
+                line.Color = color
+                line.Thickness = thickness
+                line.Transparency = 1
+                return line
+            end
+            
+            local function Vis(lib,  state)
+                for i,  v in pairs(lib) do
+                    v.Visible = state
+                end
+            end
+            
+            local function Colorize(lib,  color)
+                for i,  v in pairs(lib) do
+                    v.Color = color
+                end
+            end
+            
+            local function Main(plr)
+                if not CornersESPEnabled then return end
+                repeat wait() until plr.Character ~= nil and plr.Character: FindFirstChild("Humanoid") ~= nil
+                
+                local Library = {
+                    TL1 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    TL2 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    TR1 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    TR2 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    BL1 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    BL2 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    BR1 = NewLine(Settings.Box_Color,  Settings.Box_Thickness), 
+                    BR2 = NewLine(Settings.Box_Color,  Settings.Box_Thickness)
+                }
+                
+                table.insert(CornersDrawings,  Library)
+                
+                local oripart = Instance.new("Part")
+                oripart.Parent = Space
+                oripart.Transparency = 1
+                oripart.CanCollide = false
+                oripart.Size = Vector3.new(1,  1,  1)
+                oripart.Position = Vector3.new(0,  0,  0)
+                
+                local function Updater()
+                    local c
+                    c = game: GetService("RunService").Heartbeat: Connect(function()
+                        if not CornersESPEnabled or not plr or not game: GetService("Players"): FindFirstChild(plr.Name) then
+                            Vis(Library,  false)
+                            for i,  v in pairs(Library) do
+                                if v and typeof(v) == "Instance" then
+                                    v: Remove()
+                                end
+                            end
+                            if oripart then
+                                oripart: Destroy()
+                            end
+                            if c then
+                                c: Disconnect()
+                            end
+                            return
+                        end
+                        
+                        -- Team check for corners ESP
+                        if VisualsTeamCheck and plr.Team == Player.Team then
+                            Vis(Library, false)
+                            return
+                        end
+                        
+                        if plr.Character ~= nil and plr.Character: FindFirstChild("Humanoid") ~= nil and plr.Character: FindFirstChild("HumanoidRootPart") ~= nil and plr.Character.Humanoid.Health > 0 and plr.Character: FindFirstChild("Head") ~= nil then
+                            local Hum = plr.Character
+                            local HumPos,  vis = Camera: WorldToViewportPoint(Hum.HumanoidRootPart.Position)
+                            if vis then
+                                oripart.Size = Vector3.new(Hum.HumanoidRootPart.Size.X,  Hum.HumanoidRootPart.Size.Y*1.5,  Hum.HumanoidRootPart.Size.Z)
+                                oripart.CFrame = CFrame.new(Hum.HumanoidRootPart.CFrame.Position,  Camera.CFrame.Position)
+                                
+                                local SizeX = oripart.Size.X
+                                local SizeY = oripart.Size.Y
+                                
+                                local TL = Camera: WorldToViewportPoint((oripart.CFrame * CFrame.new(SizeX,  SizeY,  0)).p)
+                                local TR = Camera: WorldToViewportPoint((oripart.CFrame * CFrame.new(-SizeX,  SizeY,  0)).p)
+                                local BL = Camera: WorldToViewportPoint((oripart.CFrame * CFrame.new(SizeX,  -SizeY,  0)).p)
+                                local BR = Camera: WorldToViewportPoint((oripart.CFrame * CFrame.new(-SizeX,  -SizeY,  0)).p)
+                                
+                                if Settings.Team_Check then
+                                    if plr.TeamColor == Player.TeamColor then
+                                        Colorize(Library,  Color3.fromRGB(0,  255,  0))
+                                    else
+                                        Colorize(Library,  Color3.fromRGB(255,  0,  0))
+                                    end
+                                end
+                                
+                                if Settings.Team_Color then
+                                    Colorize(Library,  plr.TeamColor.Color)
+                                end
+                                
+                                local ratio = (Camera.CFrame.p - Hum.HumanoidRootPart.Position).magnitude
+                                local offset = math.clamp(1/ratio*750,  2,  300)
+                                
+                                Library.TL1.From = Vector2.new(TL.X,  TL.Y)
+                                Library.TL1.To = Vector2.new(TL.X + offset,  TL.Y)
+                                Library.TL2.From = Vector2.new(TL.X,  TL.Y)
+                                Library.TL2.To = Vector2.new(TL.X,  TL.Y + offset)
+                                
+                                Library.TR1.From = Vector2.new(TR.X,  TR.Y)
+                                Library.TR1.To = Vector2.new(TR.X - offset,  TR.Y)
+                                Library.TR2.From = Vector2.new(TR.X,  TR.Y)
+                                Library.TR2.To = Vector2.new(TR.X,  TR.Y + offset)
+                                
+                                Library.BL1.From = Vector2.new(BL.X,  BL.Y)
+                                Library.BL1.To = Vector2.new(BL.X + offset,  BL.Y)
+                                Library.BL2.From = Vector2.new(BL.X,  BL.Y)
+                                Library.BL2.To = Vector2.new(BL.X,  BL.Y - offset)
+                                
+                                Library.BR1.From = Vector2.new(BR.X,  BR.Y)
+                                Library.BR1.To = Vector2.new(BR.X - offset,  BR.Y)
+                                Library.BR2.From = Vector2.new(BR.X,  BR.Y)
+                                Library.BR2.To = Vector2.new(BR.X,  BR.Y - offset)
+                                
+                                Vis(Library,  true)
+                                
+                                if Settings.Autothickness then
+                                    local distance = (Player.Character.HumanoidRootPart.Position - oripart.Position).magnitude
+                                    local value = math.clamp(1/distance*100,  1,  4)
+                                    for u,  x in pairs(Library) do
+                                        x.Thickness = value
+                                    end
+                                else
+                                    for u,  x in pairs(Library) do
+                                        x.Thickness = Settings.Box_Thickness
+                                    end
+                                end
+                            else
+                                Vis(Library,  false)
+                            end
+                        else
+                            Vis(Library,  false)
+                            if not game: GetService("Players"): FindFirstChild(plr.Name) then
+                                for i,  v in pairs(Library) do
+                                    if v and typeof(v) == "Instance" then
+                                        v: Remove()
+                                    end
+                                end
+                                if oripart then
+                                    oripart: Destroy()
+                                end
+                                if c then
+                                    c: Disconnect()
+                                end
+                            end
+                        end
+                    end)
+                end
+                
+                coroutine.wrap(Updater)()
+            end
+            
+            for i,  v in pairs(game: GetService("Players"): GetPlayers()) do
+                if v.Name ~= Player.Name then
+                    coroutine.wrap(Main)(v)
+                end
+            end
+            
+            local playerAddedConn = game: GetService("Players").PlayerAdded: Connect(function(newplr)
+                if CornersESPEnabled then
+                    coroutine.wrap(Main)(newplr)
+                end
+            end)
+            table.insert(CornersConnections,  playerAddedConn)
+        else
+            for _,  lib in pairs(CornersDrawings) do
+                for _,  line in pairs(lib) do
+                    if line and typeof(line) == "Instance" then
+                        line: Remove()
+                    end
+                end
+            end
+            CornersDrawings = {}
+            
+            for _,  conn in ipairs(CornersConnections) do
+                if conn then
+                    pcall(function() conn: Disconnect() end)
+                end
+            end
+            CornersConnections = {}
+        end
+    end
+})
+
+-- View Tracers Toggle
+local TracersEnabled = false
+local TracersDrawings = {}
+local TracersConnections = {}
+
+Visuals_Enemies: Toggle({
+    Name = "View Tracers",   
+    Default = false,   
+    Callback = function(state)
+        TracersEnabled = state
+        if state then
+            local Settings = {
+                Color = Color3.fromRGB(255,  203,  138), 
+                Thickness = 1, 
+                Transparency = 1, 
+                AutoThickness = true, 
+                Length = 15, 
+                Smoothness = 0.2
+            }
+            
+            local player = game: GetService("Players").LocalPlayer
+            local camera = game: GetService("Workspace").CurrentCamera
+            
+            local function ESP(plr)
+                if not TracersEnabled then return end
+                
+                local line = Drawing.new("Line")
+                line.Visible = false
+                line.From = Vector2.new(0,  0)
+                line.To = Vector2.new(0,  0)
+                line.Color = Settings.Color
+                line.Thickness = Settings.Thickness
+                line.Transparency = Settings.Transparency
+                
+                table.insert(TracersDrawings,  line)
+                
+                local function Updater()
+                    local connection
+                    connection = game: GetService("RunService").Heartbeat: Connect(function()
+                        if not TracersEnabled or not plr or not game.Players: FindFirstChild(plr.Name) then
+                            line.Visible = false
+                            if connection then
+                                connection: Disconnect()
+                            end
+                            return
+                        end
+                        
+                        -- Team check for tracers
+                        if VisualsTeamCheck and plr.Team == player.Team then
+                            line.Visible = false
+                            return
+                        end
+                        
+                        if TracersEnabled and plr.Character ~= nil and plr.Character: FindFirstChild("Humanoid") ~= nil and plr.Character: FindFirstChild("HumanoidRootPart") ~= nil and plr.Character.Humanoid.Health > 0 and plr.Character: FindFirstChild("Head") ~= nil then
+                            local headpos,  OnScreen = camera: WorldToViewportPoint(plr.Character.Head.Position)
+                            if OnScreen then
+                                local offsetCFrame = CFrame.new(0,  0,  -Settings.Length)
+                                local check = false
+                                line.From = Vector2.new(headpos.X,  headpos.Y)
+                                
+                                if Settings.AutoThickness then
+                                    local distance = (player.Character.HumanoidRootPart.Position - plr.Character.HumanoidRootPart.Position).magnitude
+                                    local value = math.clamp(1/distance*100,  0.1,  3)
+                                    line.Thickness = value
+                                end
+                                
+                                repeat
+                                    local dir = plr.Character.Head.CFrame: ToWorldSpace(offsetCFrame)
+                                    offsetCFrame = offsetCFrame * CFrame.new(0,  0,  Settings.Smoothness)
+                                    local dirpos,  vis = camera: WorldToViewportPoint(Vector3.new(dir.X,  dir.Y,  dir.Z))
+                                    if vis then
+                                        check = true
+                                        line.To = Vector2.new(dirpos.X,  dirpos.Y)
+                                        line.Visible = true
+                                        offsetCFrame = CFrame.new(0,  0,  -Settings.Length)
+                                    end
+                                until check == true
+                            else
+                                line.Visible = false
+                            end
+                        else
+                            line.Visible = false
+                            if not game.Players: FindFirstChild(plr.Name) then
+                                if connection then
+                                    connection: Disconnect()
+                                end
+                            end
+                        end
+                    end)
+                end
+                
+                coroutine.wrap(Updater)()
+            end
+            
+            for i,  v in pairs(game: GetService("Players"): GetPlayers()) do
+                if v.Name ~= player.Name then
+                    coroutine.wrap(ESP)(v)
+                end
+            end
+            
+            local playerAddedConn = game.Players.PlayerAdded: Connect(function(newplr)
+                if TracersEnabled and newplr.Name ~= player.Name then
+                    coroutine.wrap(ESP)(newplr)
+                end
+            end)
+            table.insert(TracersConnections,  playerAddedConn)
+        else
+            for _,  line in pairs(TracersDrawings) do
+                if line and typeof(line) == "Instance" then
+                    line: Remove()
+                end
+            end
+            TracersDrawings = {}
+            
+            for _,  conn in ipairs(TracersConnections) do
+                if conn then
+                    pcall(function() conn: Disconnect() end)
+                end
+            end
+            TracersConnections = {}
+        end
+    end
+})
+
+-- Box ESP Toggle
+local BoxESPEnabled = false
+local SenseInstance = nil
+
+Visuals_Enemies: Toggle({
+    Name = "Box ESP",   
+    Default = false,   
+    Callback = function(state)
+        BoxESPEnabled = state
+        if state then
+            local Sense = loadstring(game: HttpGet('https://sirius.menu/sense'))()
+            Sense.teamSettings.enemy.enabled = true
+            Sense.teamSettings.enemy.box = true
+            Sense.teamSettings.enemy.boxColor[1] = Color3.new(0,  1,  0)
+            Sense.Load()
+            SenseInstance = Sense
+        else
+            if SenseInstance then
+                SenseInstance.Unload()
+                SenseInstance = nil
+            end
+        end
+    end
+})
+
+-- Hitboxes Toggle
+local HitboxesEnabled = false
+local HitboxesLines = {}
+local HitboxesQuads = {}
+local HitboxesConnection = nil
+
+Visuals_Enemies: Toggle({
+    Name = "Hitboxes",   
+    Default = false,   
+    Callback = function(state)
+        HitboxesEnabled = state
+        if state then
+            local RunService = game: GetService("RunService")
+            local PlayersService = game: GetService("Players")
+            local Camera = workspace.CurrentCamera
+            
+            local function HasCharacter(Player)
+                return Player.Character and Player.Character: FindFirstChild("HumanoidRootPart")
+            end
+            
+            local function DrawQuad(PosA,  PosB,  PosC,  PosD)
+                local PosAScreen,  PosAVisible = Camera: WorldToViewportPoint(PosA)
+                local PosBScreen,  PosBVisible = Camera: WorldToViewportPoint(PosB)
+                local PosCScreen,  PosCVisible = Camera: WorldToViewportPoint(PosC)
+                local PosDScreen,  PosDVisible = Camera: WorldToViewportPoint(PosD)
+                
+                if (not PosAVisible and not PosBVisible and not PosCVisible and not PosDVisible) then return end
+                
+                local PosAVec = Vector2.new(PosAScreen.X,  PosAScreen.Y)
+                local PosBVec = Vector2.new(PosBScreen.X,  PosBScreen.Y)
+                local PosCVec = Vector2.new(PosCScreen.X,  PosCScreen.Y)
+                local PosDVec = Vector2.new(PosDScreen.X,  PosDScreen.Y)
+                
+                local Quad = Drawing.new("Quad")
+                Quad.Thickness = .5
+                Quad.Color = Color3.fromRGB(0,  255,  0)
+                Quad.Transparency = .25
+                Quad.ZIndex = 1
+                Quad.Filled = true
+                Quad.Visible = true
+                Quad.PointA = PosAVec
+                Quad.PointB = PosBVec
+                Quad.PointC = PosCVec
+                Quad.PointD = PosDVec
+                
+                table.insert(HitboxesQuads,  Quad)
+            end
+            
+            local function DrawLine(From,  To)
+                local FromScreen,  FromVisible = Camera: WorldToViewportPoint(From)
+                local ToScreen,  ToVisible = Camera: WorldToViewportPoint(To)
+                
+                if (not FromVisible and not ToVisible) then return end
+                
+                local FromPos = Vector2.new(FromScreen.X,  FromScreen.Y)
+                local ToPos = Vector2.new(ToScreen.X,  ToScreen.Y)
+                
+                local Line = Drawing.new("Line")
+                Line.Thickness = 1
+                Line.From = FromPos
+                Line.To = ToPos
+                Line.Color = Color3.fromRGB(0,  255,  0)
+                Line.Transparency = 1
+                Line.ZIndex = 1
+                Line.Visible = true
+                
+                table.insert(HitboxesLines,  Line)
+            end
+            
+            local function GetCorners(Part)
+                local CF,  Size,  Corners = Part.CFrame,  Part.Size / 2,  {}
+                for X = -1,  1,  2 do
+                    for Y = -1,  1,  2 do
+                        for Z = -1,  1,  2 do
+                            Corners[#Corners+1] = (CF * CFrame.new(Size * Vector3.new(X,  Y,  Z))).Position
+                        end
+                    end
+                end
+                return Corners
+            end
+            
+            local function DrawEsp(Player)
+                local HRP = Player.Character.HumanoidRootPart
+                local CubeVertices = GetCorners({CFrame = HRP.CFrame * CFrame.new(0,  -0.5,  0),  Size = Vector3.new(3,  5,  3)})
+                
+                DrawLine(CubeVertices[1],  CubeVertices[2])
+                DrawLine(CubeVertices[2],  CubeVertices[6])
+                DrawLine(CubeVertices[6],  CubeVertices[5])
+                DrawLine(CubeVertices[5],  CubeVertices[1])
+                DrawQuad(CubeVertices[1],  CubeVertices[2],  CubeVertices[6],  CubeVertices[5])
+                
+                DrawLine(CubeVertices[1],  CubeVertices[3])
+                DrawLine(CubeVertices[2],  CubeVertices[4])
+                DrawLine(CubeVertices[6],  CubeVertices[8])
+                DrawLine(CubeVertices[5],  CubeVertices[7])
+                DrawQuad(CubeVertices[2],  CubeVertices[4],  CubeVertices[8],  CubeVertices[6])
+                DrawQuad(CubeVertices[1],  CubeVertices[2],  CubeVertices[4],  CubeVertices[3])
+                DrawQuad(CubeVertices[1],  CubeVertices[5],  CubeVertices[7],  CubeVertices[3])
+                DrawQuad(CubeVertices[5],  CubeVertices[7],  CubeVertices[8],  CubeVertices[6])
+                
+                DrawLine(CubeVertices[3],  CubeVertices[4])
+                DrawLine(CubeVertices[4],  CubeVertices[8])
+                DrawLine(CubeVertices[8],  CubeVertices[7])
+                DrawLine(CubeVertices[7],  CubeVertices[3])
+                DrawQuad(CubeVertices[3],  CubeVertices[4],  CubeVertices[8],  CubeVertices[7])
+            end
+            
+            local function BoxEsp()
+                if not HitboxesEnabled then return end
+                
+                local Players = PlayersService: GetPlayers()
+                
+                for i = 1,  #HitboxesLines do
+                    local Line = rawget(HitboxesLines,  i)
+                    if (Line) then
+                        Line: Remove()
+                    end
+                end
+                HitboxesLines = {}
+                
+                for i = 1,  #HitboxesQuads do
+                    local Quad = rawget(HitboxesQuads,  i)
+                    if (Quad) then
+                        Quad: Remove()
+                    end
+                end
+                HitboxesQuads = {}
+                
+                for i = 1,  #Players do
+                    local Player = rawget(Players,  i)
+                    if HasCharacter(Player) then
+                        -- Team check for hitboxes
+                        if not VisualsTeamCheck or Player.Team ~= LocalPlayer.Team then
+                            DrawEsp(Player)
+                        end
+                    end
+                end
+            end
+            
+            HitboxesConnection = RunService.RenderStepped: Connect(BoxEsp)
+        else
+            if HitboxesConnection then
+                HitboxesConnection: Disconnect()
+                HitboxesConnection = nil
+            end
+            
+            for i = 1,  #HitboxesLines do
+                local Line = rawget(HitboxesLines,  i)
+                if (Line) then
+                    Line: Remove()
+                end
+            end
+            HitboxesLines = {}
+            
+            for i = 1,  #HitboxesQuads do
+                local Quad = rawget(HitboxesQuads,  i)
+                if (Quad) then
+                    Quad: Remove()
+                end
+            end
+            HitboxesQuads = {}
+        end
+    end
+})
+
+-- Name ESP Toggle
+local NameESPEnabled = false
+local NameESPDrawings = {}
+local NameESPConnections = {}
+
+Visuals_Enemies: Toggle({
+    Name = "Name ESP",   
+    Default = false,   
+    Callback = function(state)
+        NameESPEnabled = state
+        if state then
+            local settings = {
+                Color = Color3.fromRGB(255,  255,  255), 
+                Size = 20, 
+                Transparency = 1, 
+                AutoScale = true
+            }
+            
+            local space = game: GetService("Workspace")
+            local player = game: GetService("Players").LocalPlayer
+            local camera = space.CurrentCamera
+            
+            local function NewText(color,  size,  transparency)
+                local text = Drawing.new("Text")
+                text.Visible = false
+                text.Text = ""
+                text.Position = Vector2.new(0,  0)
+                text.Color = color
+                text.Size = size
+                text.Center = true
+                text.Transparency = transparency
+                return text
+            end
+            
+            local function Visibility(state,  lib)
+                for u,  x in pairs(lib) do
+                    x.Visible = state
+                end
+            end
+            
+            local function Size(size,  lib)
+                for u,  x in pairs(lib) do
+                    x.Size = size
+                end
+            end
+            
+            for i,  v in pairs(game: GetService("Players"): GetPlayers()) do
+                local library = {
+                    name = NewText(settings.Color,  settings.Size,  settings.Transparency)
+                }
+                
+                table.insert(NameESPDrawings,  library.name)
+                
+                local function ESP()
+                    local connection
+                    connection = game: GetService("RunService").RenderStepped: Connect(function()
+                        if not NameESPEnabled or not v or not game.Players: FindFirstChild(v.Name) then
+                            Visibility(false,  library)
+                            if connection then
+                                connection: Disconnect()
+                            end
+                            return
+                        end
+                        
+                        -- Team check for name ESP
+                        if VisualsTeamCheck and v.Team == player.Team then
+                            Visibility(false, library)
+                            return
+                        end
+                        
+                        if v.Character ~= nil and v.Character: FindFirstChild("Humanoid") ~= nil and v.Character: FindFirstChild("Head") ~= nil and v.Name ~= player.Name then
+                            local HeadPos,  OnScreen = camera: WorldToViewportPoint(v.Character.Head.Position)
+                            if OnScreen then
+                                library.name.Text = v.Name
+                                library.name.Position = Vector2.new(HeadPos.X,  HeadPos.Y - 20)
+                                
+                                if settings.AutoScale then
+                                    local distance = (Vector3.new(camera.CFrame.X,  camera.CFrame.Y,  camera.CFrame.Z) - v.Character.Head.Position).magnitude
+                                    local textsize = math.clamp(1/distance*1000,  4,  30)
+                                    Size(textsize,  library)
+                                else
+                                    Size(settings.Size,  library)
+                                end
+                                Visibility(true,  library)
+                            else
+                                Visibility(false,  library)
+                            end
+                        else
+                            Visibility(false,  library)
+                            if not game.Players: FindFirstChild(v.Name) then
+                                if connection then
+                                    connection: Disconnect()
+                                end
+                            end
+                        end
+                    end)
+                end
+                
+                coroutine.wrap(ESP)()
+            end
+            
+            local playerAddedConn = game.Players.PlayerAdded: Connect(function(newplr)
+                if not NameESPEnabled then return end
+                
+                local library = {
+                    name = NewText(settings.Color,  settings.Size,  settings.Transparency)
+                }
+                
+                table.insert(NameESPDrawings,  library.name)
+                
+                local function ESP()
+                    local connection
+                    connection = game: GetService("RunService").RenderStepped: Connect(function()
+                        if not NameESPEnabled or not newplr or not game.Players: FindFirstChild(newplr.Name) then
+                            Visibility(false,  library)
+                            if connection then
+                                connection: Disconnect()
+                            end
+                            return
+                        end
+                        
+                        -- Team check for name ESP
+                        if VisualsTeamCheck and newplr.Team == player.Team then
+                            Visibility(false, library)
+                            return
+                        end
+                        
+                        if newplr.Character ~= nil and newplr.Character: FindFirstChild("Humanoid") ~= nil and newplr.Character: FindFirstChild("Head") ~= nil and newplr.Name ~= player.Name then
+                            local HeadPos,  OnScreen = camera: WorldToViewportPoint(newplr.Character.Head.Position)
+                            if OnScreen then
+                                library.name.Text = newplr.Name
+                                library.name.Position = Vector2.new(HeadPos.X,  HeadPos.Y - 20)
+                                
+                                if settings.AutoScale then
+                                    local distance = (Vector3.new(camera.CFrame.X,  camera.CFrame.Y,  camera.CFrame.Z) - newplr.Character.Head.Position).magnitude
+                                    local textsize = math.clamp(1/distance*1000,  4,  30)
+                                    Size(textsize,  library)
+                                else
+                                    Size(settings.Size,  library)
+                                end
+                                Visibility(true,  library)
+                            else
+                                Visibility(false,  library)
+                            end
+                        else
+                            Visibility(false,  library)
+                            if not game.Players: FindFirstChild(newplr.Name) then
+                                if connection then
+                                    connection: Disconnect()
+                                end
+                            end
+                        end
+                    end)
+                end
+                
+                coroutine.wrap(ESP)()
+            end)
+            table.insert(NameESPConnections,  playerAddedConn)
+        else
+            for _,  drawing in pairs(NameESPDrawings) do
+                if drawing then
+                    pcall(function() drawing: Remove() end)
+                end
+            end
+            NameESPDrawings = {}
+            
+            for _,  conn in ipairs(NameESPConnections) do
+                if conn then
+                    pcall(function() conn: Disconnect() end)
+                end
+            end
+            NameESPConnections = {}
+        end
+    end
+})
+
+-- // Settings with Config Functionality
+local ConfigName = "Default"
+Settings_Main: ConfigBox({
+    Callback = function(name)
+        ConfigName = name
+    end
+})
+
+Settings_Main: ButtonHolder({
+    Buttons = {
+        {"Save",  function() Window: SaveConfig(ConfigName) end}, 
+        {"Load",  function() Window: LoadConfig(ConfigName) end}
+    }
+})
+
+Settings_Main: Label({
+    Name = "Unloading will fully unload\neverything,  so save your\nconfig before unloading.", 
+    Middle = true
+})
+
+Settings_Main: Button({
+    Name = "Unload", 
+    Callback = function()
+        Window: Unload()
+    end
+})
+
+-- // FIXED:  GUI Toggle with Right Shift ONLY - Clean version
+local guiVisible = true
+local toggleCooldown = false
+
+UserInputService.InputBegan: Connect(function(input,  gameProcessed)
+    if gameProcessed then return end
+    
+    -- Only Right Shift toggles the GUI
+    if input.KeyCode == Enum.KeyCode.RightShift and not toggleCooldown then
+        toggleCooldown = true
+        guiVisible = not guiVisible
+        
+        -- Toggle using the Frame property (works with PoopLibrary)
+        if Window and Window.Frame then
+            Window.Frame.Visible = guiVisible
+        end
+        
+        -- Small delay to prevent spam
+        task.wait(0.2)
+        toggleCooldown = false
+    end
+    
+    -- Camlock Hotkey
+    if CamLockSettings.Enabled and input.KeyCode == CamLockSettings.Hotkey and not gameProcessed then
+        if CamLockSettings.CurrentTarget then
+            CamLockSettings.CurrentTarget = nil
+        else
+            CamLockSettings.CurrentTarget = getClosestPlayerToMouse()
+        end
+    end
+end)
+
+-- // Additional drag fix - run after GUI is fully loaded
+task.spawn(function()
+    task.wait(0.5) -- Wait for GUI to fully initialize
+    
+    pcall(function()
+        -- Find the frame and remove all drag restrictions
+        local function FindAndFixFrame()
+            for _,  v in pairs(getgc(true)) do
+                if type(v) == "table" and rawget(v,  "Name") == "Poop" then
+                    -- Remove all drag limits
+                    if rawget(v,  "DragMaxX") then rawset(v,  "DragMaxX",  999999) end
+                    if rawget(v,  "DragMaxY") then rawset(v,  "DragMaxY",  999999) end
+                    if rawget(v,  "DragMinX") then rawset(v,  "DragMinX",  -999999) end
+                    if rawget(v,  "DragMinY") then rawset(v,  "DragMinY",  -999999) end
+                    
+                    -- Also remove any clamp functions
+                    for _,  child in pairs(getgc(true)) do
+                        if type(child) == "table" then
+                            if rawget(child,  "ClampPosition") then
+                                rawset(child,  "ClampPosition",  function(pos) return pos end)
+                            end
+                        end
+                    end
+                    
+                    return true
+                end
+            end
+            return false
+        end
+        
+        FindAndFixFrame()
+        
+        -- Try multiple times to catch when the frame is created
+        for i = 1,  10 do
+            if FindAndFixFrame() then break end
+            task.wait(0.1)
+        end
+    end)
+end)
+
+-- // Silent Aim Render Loop
+RunService.RenderStepped: Connect(function()
+    if SilentAimSettings.Enabled then
+        if SilentAimSettings.ShowSilentAimTarget then
+            if getClosestPlayer() then
+                local Root = getClosestPlayer().Parent.PrimaryPart or getClosestPlayer()
+                local RootToViewportPoint,  IsOnScreen = Camera: WorldToViewportPoint(Root.Position)
+                mouse_box.Visible = IsOnScreen
+                mouse_box.Position = Vector2.new(RootToViewportPoint.X,  RootToViewportPoint.Y)
+            else
+                mouse_box.Visible = false
+                mouse_box.Position = Vector2.new()
+            end
+        end
+        
+        if SilentAimSettings.FOVVisible then
+            fov_circle.Visible = true
+            fov_circle.Position = getMousePosition()
+        end
+    else
+        mouse_box.Visible = false
+        fov_circle.Visible = false
+    end
+    
+    -- Camlock Logic
+    if CamLockSettings.Enabled and CamLockSettings.CurrentTarget and CamLockSettings.CurrentTarget.Character then
+        local targetHead = CamLockSettings.CurrentTarget.Character: FindFirstChild("Head")
+        if targetHead then
+            local targetPosition = targetHead.Position
+            
+            if CamLockSettings.Prediction then
+                local deltaTime = 0.1
+                targetPosition = predictPosition(targetHead,  deltaTime)
+            end
+            
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position,  targetPosition)
+        else
+            CamLockSettings.CurrentTarget = nil
+        end
+    end
+    
+    -- Fly Logic
+    if MiscSettings.FlyEnabled and RootPart and Character then
+        local BV = RootPart: FindFirstChild("ClientFlight")
+        if BV then
+            local speed = 50
+            local moveDirection = Vector3.new()
+            
+            if UserInputService: IsKeyDown(Enum.KeyCode.W) then
+                moveDirection = moveDirection + Camera.CFrame.LookVector
+            end
+            if UserInputService: IsKeyDown(Enum.KeyCode.S) then
+                moveDirection = moveDirection - Camera.CFrame.LookVector
+            end
+            if UserInputService: IsKeyDown(Enum.KeyCode.A) then
+                moveDirection = moveDirection - Camera.CFrame.RightVector
+            end
+            if UserInputService: IsKeyDown(Enum.KeyCode.D) then
+                moveDirection = moveDirection + Camera.CFrame.RightVector
+            end
+            if UserInputService: IsKeyDown(Enum.KeyCode.Space) then
+                moveDirection = moveDirection + Vector3.new(0,  1,  0)
+            end
+            if UserInputService: IsKeyDown(Enum.KeyCode.LeftControl) then
+                moveDirection = moveDirection - Vector3.new(0,  1,  0)
+            end
+            
+            if moveDirection.Magnitude > 0 then
+                moveDirection = moveDirection.Unit * speed
+            else
+                moveDirection = Vector3.new(0,  0,  0)
+            end
+            
+            BV.Velocity = moveDirection
+        end
+    end
+    
+    -- NoClip Logic
+    if MiscSettings.NoClipEnabled and Character then
+        for _,  child in pairs(Character: GetDescendants()) do
+            if child: IsA("BasePart") then
+                child.CanCollide = false
+            end
+        end
+    end
+end)
+
+-- // Character Added Event
+LocalPlayer.CharacterAdded: Connect(function(char)
+    Character = char
+    Humanoid = char: WaitForChild("Humanoid")
+    RootPart = char: WaitForChild("HumanoidRootPart")
+    
+    if MiscSettings.FlyEnabled then
+        toggleFly(true)
+    end
+    if MiscSettings.SpeedEnabled then
+        Humanoid.WalkSpeed = MiscSettings.SpeedValue
+    end
+    if MiscSettings.NoClipEnabled then
+        toggleNoClip(true)
+    end
+end)
+
+-- // Initialisation
+Window: Initialize()
+
+print("Larpware (kason) loaded successfully!")
+print("Press Right Shift to toggle the GUI")
